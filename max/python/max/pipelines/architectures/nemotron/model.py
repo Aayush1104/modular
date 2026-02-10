@@ -2,11 +2,7 @@
 # Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
-<<<<<<< HEAD
 # https://www.llvm.org/LICENSE.txt
-=======
-# https://llvm.org/LICENSE.txt
->>>>>>> upstream/main
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +11,8 @@
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
 
-<<<<<<< HEAD
 """Nemotron pipeline model (load, execute, prepare inputs)."""
 
-=======
->>>>>>> upstream/main
 from __future__ import annotations
 
 import logging
@@ -52,34 +45,19 @@ from max.pipelines.lib import (
 )
 from transformers import AutoConfig
 
-<<<<<<< HEAD
 from .nemotron import Nemotron
 from .model_config import NemotronConfig
-=======
-from .model_config import NemotronConfig
-from .nemotron import Nemotron
->>>>>>> upstream/main
 
 logger = logging.getLogger("max.pipelines")
 
 
 class NemotronInputs(ModelInputs):
-<<<<<<< HEAD
     """Inputs for the Nemotron model: tokens, input_row_offsets, return_n_logits, kv_cache_inputs."""
 
     tokens: Buffer
     input_row_offsets: Buffer
     return_n_logits: Buffer
     kv_cache_inputs: KVCacheInputs | None
-=======
-    """A class representing inputs for the Nemotron model."""
-
-    tokens: Buffer
-    """Buffer containing the input token IDs."""
-
-    input_row_offsets: Buffer
-    """Buffer containing the offsets for each row in the ragged input sequence."""
->>>>>>> upstream/main
 
     def __init__(
         self,
@@ -90,21 +68,12 @@ class NemotronInputs(ModelInputs):
     ) -> None:
         self.tokens = tokens
         self.input_row_offsets = input_row_offsets
-<<<<<<< HEAD
         self.return_n_logits = return_n_logits
         self.kv_cache_inputs = kv_cache_inputs
 
 
 class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
     """Nemotron pipeline model for text generation."""
-=======
-        self.kv_cache_inputs = kv_cache_inputs
-        self.return_n_logits = return_n_logits
-
-
-class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
-    """A Nemotron pipeline model for text generation."""
->>>>>>> upstream/main
 
     def __init__(
         self,
@@ -129,29 +98,16 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
             adapter,
             return_logits,
         )
-<<<<<<< HEAD
-=======
-
->>>>>>> upstream/main
         self.model = self.load_model()
 
     @staticmethod
     def calculate_max_seq_len(
-<<<<<<< HEAD
         pipeline_config: PipelineConfig,
         huggingface_config: AutoConfig,
     ) -> int:
         return NemotronConfig.calculate_max_seq_len(
             pipeline_config, huggingface_config
         )
-=======
-        pipeline_config: PipelineConfig, huggingface_config: AutoConfig
-    ) -> int:
-        max_seq_len = pipeline_config.max_length
-        if max_seq_len:
-            return max_seq_len
-        return huggingface_config.max_position_embeddings
->>>>>>> upstream/main
 
     @classmethod
     def get_kv_params(
@@ -171,13 +127,7 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
         )
 
     def load_model(self) -> Callable[..., Any]:
-<<<<<<< HEAD
         assert self.pipeline_config.max_batch_size, "Expected max_batch_size"
-=======
-        assert self.pipeline_config.max_batch_size, (
-            "Expected max_batch_size to be set"
-        )
->>>>>>> upstream/main
         self._input_row_offsets_prealloc = Buffer.from_numpy(
             np.arange(self.pipeline_config.max_batch_size + 1, dtype=np.uint32)
         ).to(self.devices[0])
@@ -232,10 +182,6 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
             weights=state_dict,
         )
         timer.done()
-<<<<<<< HEAD
-=======
-
->>>>>>> upstream/main
         return compiled_model
 
     def execute(self, model_inputs: ModelInputs) -> ModelOutputs:
@@ -260,18 +206,10 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
                 next_token_logits=cast(Buffer, model_outputs[0].driver_tensor),
                 logit_offsets=cast(Buffer, model_outputs[2].driver_tensor),
             )
-<<<<<<< HEAD
         return ModelOutputs(
             logits=cast(Buffer, model_outputs[0].driver_tensor),
             next_token_logits=cast(Buffer, model_outputs[0].driver_tensor),
         )
-=======
-        else:
-            return ModelOutputs(
-                logits=cast(Buffer, model_outputs[0].driver_tensor),
-                next_token_logits=cast(Buffer, model_outputs[0].driver_tensor),
-            )
->>>>>>> upstream/main
 
     def prepare_initial_token_inputs(
         self,
@@ -281,10 +219,6 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
     ) -> ModelInputs:
         if len(replica_batches) > 1:
             raise ValueError("Model does not support DP>1")
-<<<<<<< HEAD
-=======
-
->>>>>>> upstream/main
         context_batch = replica_batches[0]
         assert kv_cache_inputs is not None
         kv_cache_inputs = cast(KVCacheInputsSequence, kv_cache_inputs)
@@ -293,20 +227,10 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
             [0] + [ctx.tokens.active_length for ctx in context_batch],
             dtype=np.uint32,
         )
-<<<<<<< HEAD
         tokens = np.concatenate([ctx.tokens.active for ctx in context_batch])
         input_row_offsets_tensor = Buffer.from_numpy(input_row_offsets).to(
             self.devices[0]
         )
-=======
-
-        tokens = np.concatenate([ctx.tokens.active for ctx in context_batch])
-
-        input_row_offsets_tensor = Buffer.from_numpy(input_row_offsets).to(
-            self.devices[0]
-        )
-
->>>>>>> upstream/main
         return NemotronInputs(
             tokens=Buffer.from_numpy(tokens).to(self.devices[0]),
             input_row_offsets=input_row_offsets_tensor,
@@ -321,17 +245,9 @@ class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
     ) -> ModelInputs:
         prev_model_inputs = cast(NemotronInputs, prev_model_inputs)
         row_offsets_size = prev_model_inputs.input_row_offsets.shape[0]
-<<<<<<< HEAD
         next_row_offsets = self._input_row_offsets_prealloc[
             :row_offsets_size
         ].to(self.devices[0])
-=======
-
-        next_row_offsets = self._input_row_offsets_prealloc[
-            :row_offsets_size
-        ].to(self.devices[0])
-
->>>>>>> upstream/main
         return NemotronInputs(
             tokens=next_tokens,
             input_row_offsets=next_row_offsets,

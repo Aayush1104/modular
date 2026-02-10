@@ -2,11 +2,7 @@
 # Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
-<<<<<<< HEAD
 # https://www.llvm.org/LICENSE.txt
-=======
-# https://llvm.org/LICENSE.txt
->>>>>>> upstream/main
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,10 +11,7 @@
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
 
-<<<<<<< HEAD
 """Nemotron architecture registration."""
-=======
->>>>>>> upstream/main
 
 from max.graph.weights import WeightsFormat
 from max.interfaces import PipelineTask
@@ -37,13 +30,7 @@ from .model_config import NemotronConfig
 
 nemotron_arch = SupportedArchitecture(
     name="NemotronForCausalLM",
-<<<<<<< HEAD
     example_repo_ids=["nvidia/Nemotron-Mini-4B-Instruct"],
-=======
-    example_repo_ids=[
-        "nvidia/Nemotron-Mini-4B-Instruct",
-    ],
->>>>>>> upstream/main
     default_encoding=SupportedEncoding.bfloat16,
     supported_encodings={
         SupportedEncoding.bfloat16: [KVCacheStrategy.PAGED],

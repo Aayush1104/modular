@@ -2,11 +2,7 @@
 # Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
-<<<<<<< HEAD
 # https://www.llvm.org/LICENSE.txt
-=======
-# https://llvm.org/LICENSE.txt
->>>>>>> upstream/main
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +11,8 @@
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
 
-<<<<<<< HEAD
 """HF → MAX weight name mapping for Nemotron (no MoE remapping)."""
 
-=======
->>>>>>> upstream/main
 from __future__ import annotations
 
 from max.graph.weights import WeightData, Weights
@@ -33,7 +26,6 @@ NEMOTRON_SAFETENSOR_MAP: dict[str, str] = {
 
 
 def convert_safetensor_state_dict(
-<<<<<<< HEAD
     state_dict: dict[str, Weights],
     **kwargs,
 ) -> dict[str, WeightData]:
@@ -44,24 +36,4 @@ def convert_safetensor_state_dict(
         for before, after in NEMOTRON_SAFETENSOR_MAP.items():
             max_name = max_name.replace(before, after)
         new_state_dict[max_name] = value.data()
-=======
-    state_dict: dict[str, Weights], **kwargs
-) -> dict[str, WeightData]:
-    """Convert safetensor state dict to MAX format.
-
-    Args:
-        state_dict: Dictionary of weight tensors
-
-    Returns:
-        Dictionary of converted weight data
-    """
-    new_state_dict: dict[str, WeightData] = {}
-
-    for weight_name, value in state_dict.items():
-        max_name: str = weight_name
-        for before, after in NEMOTRON_SAFETENSOR_MAP.items():
-            max_name = max_name.replace(before, after)
-        new_state_dict[max_name] = value.data()
-
->>>>>>> upstream/main
     return new_state_dict
