@@ -30,6 +30,7 @@ from max.nn.legacy.rotary_embedding import (
     Llama3RotaryEmbedding,
     LongRoPERotaryEmbedding,
     LongRoPEScalingParams,
+    PartialRotaryEmbedding,
     RotaryEmbedding,
 )
 from max.nn.legacy.transformer import ReturnHiddenStates, ReturnLogits
@@ -55,6 +56,8 @@ def create_rope_embedding(
     rope_scaling_params: Llama3RopeScalingParams | None,
     longrope_scaling_params: LongRoPEScalingParams | None,
     device: DeviceRef,
+    partial_rotary_factor: float | None = None,
+    head_dim: int | None = None,
 ) -> RotaryEmbedding:
     """Create appropriate RoPE embedding based on scaling parameters.
 
@@ -67,6 +70,10 @@ def create_rope_embedding(
         rope_scaling_params: Llama3 RoPE scaling parameters (if any)
         longrope_scaling_params: LongRoPE scaling parameters (if any)
         device: Device to place tensors on
+        partial_rotary_factor: If set and < 1.0, apply RoPE only to this fraction
+            of head dimensions (e.g. 0.5 for Nemotron).
+        head_dim: Head dimension; used with partial_rotary_factor (defaults to
+            hidden_size // num_attention_heads).
 
     Returns:
         Configured RoPE embedding instance
@@ -80,15 +87,29 @@ def create_rope_embedding(
             interleaved=interleaved_rope_weights,
             scaling_params=longrope_scaling_params,
         )
-    else:
-        return Llama3RotaryEmbedding(
+    if (
+        partial_rotary_factor is not None
+        and partial_rotary_factor < 1.0
+        and partial_rotary_factor > 0.0
+    ):
+        effective_head_dim = head_dim or (hidden_size // num_attention_heads)
+        return PartialRotaryEmbedding(
             dim=hidden_size,
             n_heads=num_attention_heads,
             theta=rope_theta,
             max_seq_len=max_seq_len,
+            head_dim=effective_head_dim,
             interleaved=interleaved_rope_weights,
-            scaling_params=rope_scaling_params,
+            partial_rotary_factor=partial_rotary_factor,
         )
+    return Llama3RotaryEmbedding(
+        dim=hidden_size,
+        n_heads=num_attention_heads,
+        theta=rope_theta,
+        max_seq_len=max_seq_len,
+        interleaved=interleaved_rope_weights,
+        scaling_params=rope_scaling_params,
+    )
 
 
 @dataclass(kw_only=True)
@@ -117,6 +138,10 @@ class Llama3Config(ArchConfigWithKVCache):
     tie_word_embeddings: bool = False
     stacked_mlp: bool = False
     stacked_qkv: bool = False
+    hidden_act: str = "silu"
+    """MLP activation (e.g. silu, relu2 for Nemotron)."""
+    partial_rotary_factor: float | None = None
+    """If < 1.0, apply RoPE only to this fraction of head dims (e.g. 0.5 for Nemotron)."""
     attention_multiplier: float
     embedding_multiplier: float
     residual_multiplier: float
@@ -345,6 +370,10 @@ class Llama3Config(ArchConfigWithKVCache):
             residual_multiplier=residual_multiplier,
             devices=device_refs,
             clip_qkv=getattr(huggingface_config, "clip_qkv", None),
+            hidden_act=getattr(huggingface_config, "hidden_act", "silu"),
+            partial_rotary_factor=getattr(
+                huggingface_config, "partial_rotary_factor", None
+            ),
             use_subgraphs=pipeline_config.model.use_subgraphs,
             # Force-disable matmul-allreduce overlap for llama FP8.
             # TODO: GEX-2388: Figure out the issue and re-enable this.

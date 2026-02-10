@@ -86,6 +86,12 @@ class Llama3(Transformer):
             rope_scaling_params=config.rope_scaling_params,
             longrope_scaling_params=config.longrope_scaling_params,
             device=config.devices[0],
+            partial_rotary_factor=getattr(
+                config, "partial_rotary_factor", None
+            ),
+            head_dim=config.kv_params.head_dim
+            if getattr(config, "partial_rotary_factor", None)
+            else None,
         )
 
         # Select norm layer class.

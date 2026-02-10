@@ -189,6 +189,71 @@ class RotaryEmbedding(Module[..., Tensor]):
         return F.cast(F.reshape(rope_complex, v.shape), v.dtype)
 
 
+class PartialRotaryEmbedding(RotaryEmbedding):
+    """RoPE applied only to the first (partial_rotary_factor * head_dim) dims.
+
+    Remaining dimensions get identity (cos=1, sin=0) so freqs_cis shape stays
+    (max_seq_len*2, head_dim) for the fused kernel. Used by Nemotron.
+    """
+
+    rope_dim: int
+
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        theta: float,
+        max_seq_len: int,
+        device: Device,
+        head_dim: int | None = None,
+        interleaved: bool = True,
+        partial_rotary_factor: float = 0.5,
+    ) -> None:
+        super().__init__(
+            dim,
+            n_heads,
+            theta,
+            max_seq_len,
+            device,
+            head_dim,
+            interleaved,
+        )
+        full_head_dim = self.head_dim
+        rope_dim = int(full_head_dim * partial_rotary_factor)
+        self.rope_dim = (rope_dim // 2) * 2
+
+    def _compute_inv_freqs(self) -> Tensor:
+        n = self.rope_dim
+        iota = F.arange(0, n, step=2, dtype=DType.float64, device=self.device)
+        inv_freq = F.cast(1.0 / (self.theta ** (iota / n)), DType.float32)
+        return inv_freq
+
+    @cached_property
+    def freqs_cis(self) -> Tensor:
+        inv_freqs = self._compute_inv_freqs()
+        t = F.arange(
+            0, self.max_seq_len * 2, device=self.device, dtype=DType.float32
+        )
+        freqs = F.outer(t, inv_freqs)
+        rotated = F.stack([F.cos(freqs), F.sin(freqs)], axis=-1)
+        # rotated shape (max_seq_len*2, rope_dim//2, 2) -> (max_seq_len*2, rope_dim)
+        d1, d2, d3 = rotated.shape
+        rotated_flat = F.reshape(rotated, [d1, d2 * d3])
+        pad_dim = self.head_dim - self.rope_dim
+        if pad_dim <= 0:
+            self._freqs_cis = rotated_flat
+            assert isinstance(self._freqs_cis, Tensor)
+            return self._freqs_cis
+        # Identity: cos=1, sin=0 for each pair -> [1,0,1,0,...]
+        half = pad_dim // 2
+        ones = F.ones((d1, half), device=self.device, dtype=DType.float32)
+        zeros = F.zeros((d1, half), device=self.device, dtype=DType.float32)
+        identity = F.reshape(F.stack([ones, zeros], axis=-1), (d1, pad_dim))
+        self._freqs_cis = F.concat([rotated_flat, identity], axis=-1)
+        assert isinstance(self._freqs_cis, Tensor)
+        return self._freqs_cis
+
+
 class YarnRotaryEmbedding(RotaryEmbedding):
     """
     Generic YaRN (Yet another RoPE eNhancement) Rotary Position Embedding layer.

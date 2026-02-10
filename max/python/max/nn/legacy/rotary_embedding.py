@@ -182,6 +182,65 @@ class RotaryEmbedding(Module):
         return ops.cast(ops.reshape(rope_complex, v.shape), v.dtype)
 
 
+class PartialRotaryEmbedding(RotaryEmbedding):
+    """RoPE applied only to the first (partial_rotary_factor * head_dim) dimensions.
+
+    Used by models such as Nemotron (partial_rotary_factor=0.5). The rest of the
+    head dimensions are left unchanged.
+    """
+
+    rope_dim: int
+    """Number of dimensions to apply RoPE to (even, <= head_dim)."""
+
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        theta: float,
+        max_seq_len: int,
+        head_dim: int | None = None,
+        _freqs_cis: TensorValueLike | None = None,
+        interleaved: bool = True,
+        partial_rotary_factor: float = 1.0,
+    ) -> None:
+        super().__init__(
+            dim,
+            n_heads,
+            theta,
+            max_seq_len,
+            head_dim,
+            _freqs_cis,
+            interleaved,
+        )
+        full_head_dim = self.head_dim
+        rope_dim = int(full_head_dim * partial_rotary_factor)
+        self.rope_dim = (rope_dim // 2) * 2  # ensure even for complex pairs
+
+    def _compute_inv_freqs(self) -> TensorValue:
+        """Compute inv_freqs for rope_dim // 2 rotation blocks (partial RoPE)."""
+        n = self.rope_dim
+        iota = ops.range(
+            0, n, step=2, dtype=DType.float64, device=DeviceRef.CPU()
+        )
+        inv_freq = ops.cast(1.0 / (self.theta ** (iota / n)), DType.float32)
+        return inv_freq
+
+    def __call__(
+        self,
+        x: TensorValueLike,
+        start_pos: Dim | None = None,
+        seq_len: Dim | None = None,
+    ) -> TensorValue:
+        """Apply RoPE only to the first rope_dim dimensions; pass through the rest."""
+        v = TensorValue(x)
+        if self.rope_dim >= v.shape[-1]:
+            return super().__call__(x, start_pos=start_pos, seq_len=seq_len)
+        x_rot = v[..., : self.rope_dim]
+        x_rest = v[..., self.rope_dim :]
+        rotated = super().__call__(x_rot, start_pos=start_pos, seq_len=seq_len)
+        return ops.concat((rotated, x_rest), axis=-1)
+
+
 class DynamicRotaryEmbedding(RotaryEmbedding):
     """
     RotaryEmbedding with dynamic scaling support for long-context inference.

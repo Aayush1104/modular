@@ -66,6 +66,12 @@ class DistributedLlama3(DistributedTransformer):
             rope_scaling_params=config.rope_scaling_params,
             longrope_scaling_params=config.longrope_scaling_params,
             device=DeviceRef.CPU(),
+            partial_rotary_factor=getattr(
+                config, "partial_rotary_factor", None
+            ),
+            head_dim=config.kv_params.head_dim
+            if getattr(config, "partial_rotary_factor", None)
+            else None,
         )
 
         create_distributed_norm = functools.partial(
