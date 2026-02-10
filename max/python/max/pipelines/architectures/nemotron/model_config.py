@@ -19,17 +19,13 @@ from dataclasses import dataclass
 
 from max.dtype import DType
 from max.graph import DeviceRef
-from max.graph.quantization import QuantizationEncoding
 from max.graph.weights import WeightData, WeightsFormat, weights_format
-from max.nn.legacy.float8_config import Float8Config
 from max.nn.legacy.kv_cache import KVCacheParams
 from max.nn.legacy.transformer import ReturnLogits
 from max.pipelines.lib import (
     KVCacheConfig,
     PipelineConfig,
     RopeType,
-    parse_float8_config,
-    upper_bounded_default,
 )
 from max.pipelines.lib.interfaces.arch_config import ArchConfigWithKVCache
 from transformers import AutoConfig
@@ -59,19 +55,17 @@ class NemotronConfig(ArchConfigWithKVCache):
     head_dim: int
     partial_rotary_factor: float
     norm_eps: float
-    model_quantization_encoding: QuantizationEncoding | None
     kv_params: KVCacheParams
-    return_logits: ReturnLogits = ReturnLogits.LAST_TOKEN
-    norm_dtype: DType | None = None
+    devices: list[DeviceRef]
+    interleaved_rope_weights: bool
+    attention_multiplier: float
+    embedding_multiplier: float = 1.0
+    residual_multiplier: float = 1.0
     attention_bias: bool = False
     tie_word_embeddings: bool = False
     stacked_qkv: bool = False
-    attention_multiplier: float = 1.0
-    embedding_multiplier: float = 1.0
-    residual_multiplier: float = 1.0
-    devices: list[DeviceRef]
-    float8_config: Float8Config | None = None
-    interleaved_rope_weights: bool = False
+    norm_dtype: DType | None = None
+    return_logits: ReturnLogits = ReturnLogits.LAST_TOKEN
 
     def get_kv_params(self) -> KVCacheParams:
         return self.kv_params
@@ -122,18 +116,10 @@ class NemotronConfig(ArchConfigWithKVCache):
         pipeline_config: PipelineConfig,
         huggingface_config: AutoConfig,
     ) -> int:
-        try:
-            return upper_bounded_default(
-                upper_bound=huggingface_config.max_position_embeddings,
-                default=pipeline_config.max_length,
-            )
-        except ValueError as e:
-            raise ValueError(
-                "Unable to infer max_length for Nemotron, the provided "
-                f"max_length ({pipeline_config.max_length}) exceeds the "
-                f"model's max_position_embeddings "
-                f"({huggingface_config.max_position_embeddings})."
-            ) from e
+        max_seq_len = pipeline_config.max_length
+        if max_seq_len:
+            return max_seq_len
+        return huggingface_config.max_position_embeddings
 
     @override
     @classmethod
@@ -143,8 +129,7 @@ class NemotronConfig(ArchConfigWithKVCache):
             raise ValueError(
                 f"HuggingFace config is required for "
                 f"'{pipeline_config.model.model_path}', but config could not "
-                f"be loaded. Please ensure the model repository contains a "
-                f"valid config.json file."
+                f"be loaded."
             )
 
         kv_cache_config = pipeline_config.model.kv_cache
@@ -153,7 +138,6 @@ class NemotronConfig(ArchConfigWithKVCache):
             raise ValueError("quantization_encoding must not be None")
         dtype = quantization_encoding.dtype
         cache_dtype = pipeline_config.model.kv_cache.cache_dtype
-        n_devices = len(pipeline_config.model.device_specs)
 
         _weights_format = weights_format(pipeline_config.model.weight_path)
         interleaved_rope_weights = (
@@ -163,7 +147,7 @@ class NemotronConfig(ArchConfigWithKVCache):
 
         device_refs = [
             DeviceRef(spec.device_type, spec.id)
-            for spec in pipeline_config.model.device_specs[:n_devices]
+            for spec in pipeline_config.model.device_specs
         ]
 
         head_dim = cls.get_head_dim(huggingface_config)
@@ -193,7 +177,6 @@ class NemotronConfig(ArchConfigWithKVCache):
                 huggingface_config, "partial_rotary_factor", 0.5
             ),
             norm_eps=getattr(huggingface_config, "norm_eps", 1e-5),
-            model_quantization_encoding=pipeline_config.model.graph_quantization_encoding,
             max_seq_len=cls.calculate_max_seq_len(
                 pipeline_config, huggingface_config=huggingface_config
             ),
@@ -218,45 +201,19 @@ class NemotronConfig(ArchConfigWithKVCache):
         return_logits: ReturnLogits,
     ) -> None:
         """Complete configuration that requires introspection of the weights."""
-
-        # Strip common prefixes so downstream key checks work uniformly.
-        has_model_prefix = any(k.startswith("model.") for k in state_dict)
-        if has_model_prefix:
-            normalized = {
-                k.removeprefix("model."): v
-                for k, v in state_dict.items()
-                if k.startswith("model.")
-            }
-        else:
-            normalized = dict(state_dict)
-
-        # Float8 support.
-        float8_config = parse_float8_config(
-            huggingface_config, normalized, self.dtype
+        # When tie_word_embeddings=True, the embedding weights are shared with
+        # the output weights.
+        tie_word_embeddings = (
+            getattr(huggingface_config, "tie_word_embeddings", False)
+            or "lm_head.weight" not in state_dict
         )
 
-        # Norm dtype from weights (only used when float8 needs a specific norm dtype).
-        norm_dtype = None
-        if "layers.0.input_layernorm.weight" in normalized:
-            norm_dtype = normalized["layers.0.input_layernorm.weight"].dtype
-
-        # Tie word embeddings.
-        if "tie_word_embeddings" in huggingface_config:
-            tie_word_embeddings = huggingface_config.tie_word_embeddings
-        else:
-            tie_word_embeddings = (
-                getattr(huggingface_config, "tie_word_embeddings", False)
-                or "lm_head.weight" not in normalized
-            )
-
         self.tie_word_embeddings = tie_word_embeddings
-        self.float8_config = float8_config
-        self.norm_dtype = norm_dtype
         self.return_logits = return_logits
 
         # Detect stacked QKV weights.
         self.stacked_qkv = (
-            "layers.0.self_attn.qkv_proj.weight" in normalized
+            "layers.0.self_attn.qkv_proj.weight" in state_dict
         )
 
         # Nemotron does not use attention bias by default.

@@ -12,41 +12,83 @@
 # ===----------------------------------------------------------------------=== #
 """Nemotron pipeline model.
 
-Reuses the ``LlamaModelBase`` pipeline infrastructure (KV cache management,
-input preparation, execution) and overrides ``_build_graph`` to assemble a
-``Nemotron`` model graph instead of a ``Llama3`` one.
+Uses the new ``max.nn.Module`` API with ``F.lazy()`` compilation, following
+the GPT-OSS pipeline pattern.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
+import numpy as np
+from max import functional as F
+from max.driver import Buffer, Device
 from max.dtype import DType
-from max.driver import Device
 from max.engine import InferenceSession
-from max.graph import DeviceRef, Graph
-from max.graph.weights import WeightData, Weights, WeightsAdapter
-from max.nn.legacy.kv_cache import KVCacheParams, PagedCacheValues
+from max.graph import DeviceRef, TensorType
+from max.graph.weights import Weights, WeightsAdapter
+from max.nn.legacy.kv_cache import (
+    KVCacheInputs,
+    KVCacheInputsSequence,
+    KVCacheParams,
+)
 from max.nn.legacy.transformer import ReturnLogits
+from max.pipelines.core import TextContext
 from max.pipelines.lib import (
+    CompilationTimer,
     KVCacheConfig,
+    KVCacheMixin,
+    ModelInputs,
+    ModelOutputs,
     PipelineConfig,
+    PipelineModel,
     SupportedEncoding,
 )
 from transformers import AutoConfig
 
-from ..llama3.model import LlamaModelBase
 from .model_config import NemotronConfig
 from .nemotron import Nemotron
 
+logger = logging.getLogger("max.pipelines")
 
-class NemotronModel(LlamaModelBase):
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+
+class NemotronInputs(ModelInputs):
+    """Input buffers for the Nemotron model."""
+
+    tokens: Buffer
+    input_row_offsets: Buffer
+    return_n_logits: Buffer
+
+    def __init__(
+        self,
+        tokens: Buffer,
+        input_row_offsets: Buffer,
+        return_n_logits: Buffer,
+        kv_cache_inputs: KVCacheInputs | None = None,
+    ) -> None:
+        self.tokens = tokens
+        self.input_row_offsets = input_row_offsets
+        self.return_n_logits = return_n_logits
+        self.kv_cache_inputs = kv_cache_inputs
+
+
+# ---------------------------------------------------------------------------
+# Pipeline model
+# ---------------------------------------------------------------------------
+
+
+class NemotronModel(PipelineModel[TextContext], KVCacheMixin):
     """Nemotron pipeline model implementation.
 
-    Extends ``LlamaModelBase`` which provides the full pipeline lifecycle:
-    input preparation, KV-cache plumbing, execution, and log-probability
-    computation.  Only ``_build_graph`` is overridden to wire up the
-    Nemotron-specific graph (LayerNorm, partial RoPE, squared-ReLU MLP).
+    Handles model compilation, KV-cache plumbing, input preparation, and
+    execution for the Nemotron architecture.
     """
 
     def __init__(
@@ -72,10 +114,19 @@ class NemotronModel(LlamaModelBase):
             adapter,
             return_logits,
         )
+        self.model = self.load_model()
 
     # ------------------------------------------------------------------
-    # KV params delegate
+    # Static helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def calculate_max_seq_len(
+        pipeline_config: PipelineConfig, huggingface_config: AutoConfig
+    ) -> int:
+        return NemotronConfig.calculate_max_seq_len(
+            pipeline_config, huggingface_config
+        )
 
     @classmethod
     def get_kv_params(
@@ -94,81 +145,154 @@ class NemotronModel(LlamaModelBase):
             cache_dtype,
         )
 
-    @classmethod
-    def calculate_max_seq_len(
-        cls, pipeline_config: PipelineConfig, huggingface_config: AutoConfig
-    ) -> int:
-        return NemotronConfig.calculate_max_seq_len(
-            pipeline_config, huggingface_config
+    # ------------------------------------------------------------------
+    # Model loading & compilation
+    # ------------------------------------------------------------------
+
+    def load_model(self) -> Callable[..., Any]:
+        """Compiles the Nemotron model graph via the new Module API."""
+        assert self.pipeline_config.max_batch_size, (
+            "Expected max_batch_size to be set"
         )
+        self._input_row_offsets_prealloc = Buffer.from_numpy(
+            np.arange(self.pipeline_config.max_batch_size + 1, dtype=np.uint32)
+        ).to(self.devices[0])
 
-    # ------------------------------------------------------------------
-    # Graph construction
-    # ------------------------------------------------------------------
+        timer = CompilationTimer("model")
 
-    def _get_state_dict(
-        self,
-        weights: Weights,
-        adapter: WeightsAdapter | None = None,
-    ) -> dict[str, WeightData]:
+        device0 = self.devices[0]
+        device_ref = DeviceRef(device0.label, device0.id)
+
+        # Build state dict.
         huggingface_config = self.huggingface_config
-        if adapter:
-            state_dict = adapter(
-                dict(weights.items()),
+        if self.adapter:
+            state_dict = self.adapter(
+                dict(self.weights.items()),
                 huggingface_config=huggingface_config,
                 pipeline_config=self.pipeline_config,
             )
         else:
-            state_dict = {key: value.data() for key, value in weights.items()}
-        return state_dict
+            state_dict = {
+                key: value.data() for key, value in self.weights.items()
+            }
 
-    def _build_graph(
-        self,
-        weights: Weights,
-        adapter: WeightsAdapter | None = None,
-    ) -> Graph:
-        state_dict = self._get_state_dict(weights, adapter)
-
+        # Build config.
         model_config = NemotronConfig.initialize(self.pipeline_config)
         model_config.finalize(
-            huggingface_config=self.huggingface_config,
+            huggingface_config=huggingface_config,
             state_dict=state_dict,
             return_logits=self.return_logits,
         )
 
-        # Single-GPU execution path.
-        model = Nemotron(model_config)
+        # Construct model inside a lazy context.
+        with F.lazy():
+            nn_model = Nemotron(model_config, self.kv_manager)
+            nn_model.to(device0)
 
-        model.load_state_dict(
-            state_dict,
-            override_quantization_encoding=True,
-            weight_alignment=1,
-            strict=False,
+        # Symbolic input types.
+        tokens_type = TensorType(
+            DType.int64, shape=["total_seq_len"], device=device_ref
         )
-        self.state_dict: dict[str, Any] = model.state_dict()
+        input_row_offsets_type = TensorType(
+            DType.uint32, shape=["input_row_offsets_len"], device=device0
+        )
+        return_n_logits_type = TensorType(
+            DType.int64, shape=["return_n_logits"], device=DeviceRef.CPU()
+        )
 
-        with Graph(
-            "nemotron",
-            input_types=model.input_types(self.kv_params),
-        ) as graph:
-            (
-                tokens,
-                input_row_offsets,
-                return_n_logits,
-                *kv_cache_inputs,
-            ) = graph.inputs
+        kv_inputs = self.kv_params.get_symbolic_inputs()
+        flattened_kv_types = [
+            kv_type for sublist in kv_inputs for kv_type in sublist
+        ]
 
-            kv_collection = PagedCacheValues(
-                kv_blocks=kv_cache_inputs[0].buffer,
-                cache_lengths=kv_cache_inputs[1].tensor,
-                lookup_table=kv_cache_inputs[2].tensor,
-                max_lengths=kv_cache_inputs[3].tensor,
-            )
-            outputs = model(
-                tokens.tensor,
-                kv_collection,
-                return_n_logits.tensor,
-                input_row_offsets.tensor,
-            )
-            graph.output(*outputs)
-            return graph
+        timer.mark_build_complete()
+        compiled_model = nn_model.compile(
+            tokens_type,
+            return_n_logits_type,
+            input_row_offsets_type,
+            *flattened_kv_types,
+            weights=state_dict,
+        )
+        timer.done()
+
+        return compiled_model
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
+    def execute(self, model_inputs: ModelInputs) -> ModelOutputs:
+        model_inputs = cast(NemotronInputs, model_inputs)
+        curr_kv_cache_inputs = model_inputs.kv_cache_inputs or ()
+
+        if isinstance(model_inputs.input_row_offsets, np.ndarray):
+            input_row_offsets = Buffer.from_numpy(
+                model_inputs.input_row_offsets
+            ).to(self.devices[0])
+        else:
+            input_row_offsets = model_inputs.input_row_offsets
+
+        model_outputs = self.model(
+            model_inputs.tokens,
+            model_inputs.return_n_logits,
+            input_row_offsets,
+            *curr_kv_cache_inputs,
+        )
+
+        return ModelOutputs(
+            logits=cast(Buffer, model_outputs[0].driver_tensor),
+            next_token_logits=cast(Buffer, model_outputs[0].driver_tensor),
+        )
+
+    # ------------------------------------------------------------------
+    # Input preparation
+    # ------------------------------------------------------------------
+
+    def prepare_initial_token_inputs(
+        self,
+        replica_batches: Sequence[Sequence[TextContext]],
+        kv_cache_inputs: KVCacheInputs | None = None,
+        return_n_logits: int = 1,
+    ) -> ModelInputs:
+        if len(replica_batches) > 1:
+            raise ValueError("Nemotron does not support data parallelism > 1")
+
+        context_batch = replica_batches[0]
+        assert kv_cache_inputs is not None
+        kv_cache_inputs = cast(KVCacheInputsSequence, kv_cache_inputs)
+
+        input_row_offsets = np.cumsum(
+            [0] + [ctx.tokens.active_length for ctx in context_batch],
+            dtype=np.uint32,
+        )
+        tokens = np.concatenate([ctx.tokens.active for ctx in context_batch])
+
+        input_row_offsets_tensor = Buffer.from_numpy(input_row_offsets).to(
+            self.devices[0]
+        )
+
+        return NemotronInputs(
+            tokens=Buffer.from_numpy(tokens).to(self.devices[0]),
+            input_row_offsets=input_row_offsets_tensor,
+            return_n_logits=Buffer.from_numpy(
+                np.array([return_n_logits], dtype=np.int64)
+            ),
+            kv_cache_inputs=kv_cache_inputs,
+        )
+
+    def prepare_next_token_inputs(
+        self, next_tokens: Buffer, prev_model_inputs: ModelInputs
+    ) -> ModelInputs:
+        prev = cast(NemotronInputs, prev_model_inputs)
+        row_offsets_size = prev.input_row_offsets.shape[0]
+
+        next_row_offsets = self._input_row_offsets_prealloc[
+            :row_offsets_size
+        ].to(self.devices[0])
+
+        return NemotronInputs(
+            tokens=next_tokens,
+            input_row_offsets=next_row_offsets,
+            return_n_logits=prev.return_n_logits,
+            kv_cache_inputs=prev.kv_cache_inputs,
+        )

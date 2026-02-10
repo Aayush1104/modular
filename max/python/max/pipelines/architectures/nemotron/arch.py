@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
-"""Architecture registration for Nemotron (NemotronForCausalLM)."""
+"""Architecture registration for NemotronForCausalLM."""
 
 from max.graph.weights import WeightsFormat
 from max.interfaces import PipelineTask
@@ -29,20 +29,21 @@ from .model_config import NemotronConfig
 
 nemotron_arch = SupportedArchitecture(
     name="NemotronForCausalLM",
-    task=PipelineTask.TEXT_GENERATION,
     example_repo_ids=[
         "nvidia/Minitron-4B-Instruct",
         "nvidia/Nemotron-Mini-4B-Instruct",
     ],
-    default_weights_format=WeightsFormat.safetensors,
     default_encoding=SupportedEncoding.bfloat16,
     supported_encodings={
         SupportedEncoding.float32: [KVCacheStrategy.PAGED],
         SupportedEncoding.bfloat16: [KVCacheStrategy.PAGED],
     },
     pipeline_model=NemotronModel,
+    task=PipelineTask.TEXT_GENERATION,
     tokenizer=TextTokenizer,
     context_type=TextContext,
+    default_weights_format=WeightsFormat.safetensors,
+    multi_gpu_supported=False,
     rope_type=RopeType.normal,
     weight_adapters={
         WeightsFormat.safetensors: weight_adapters.convert_safetensor_state_dict,
