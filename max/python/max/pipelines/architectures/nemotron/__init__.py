@@ -2,7 +2,11 @@
 # Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
+<<<<<<< HEAD
 # https://www.llvm.org/LICENSE.txt
+=======
+# https://llvm.org/LICENSE.txt
+>>>>>>> upstream/main
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -11,6 +15,10 @@
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> upstream/main
 from .arch import nemotron_arch
 
 __all__ = ["nemotron_arch"]
