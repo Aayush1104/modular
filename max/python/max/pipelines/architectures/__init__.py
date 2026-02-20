@@ -51,6 +51,7 @@ def register_all_models() -> None:
     from .llama3 import llama_arch
     from .llama4 import llama4_arch
     from .mistral import mistral_arch
+    from .nemotron_mini_instruct import nemotron_arch
     from .mistral3 import mistral3_arch
     from .mpnet import mpnet_arch
     from .nemotron import nemotron_arch
@@ -83,6 +84,7 @@ def register_all_models() -> None:
         llama4_arch,
         bert_arch,
         mistral_arch,
+        nemotron_arch,
         mistral3_arch,
         mpnet_arch,
         nemotron_arch,
